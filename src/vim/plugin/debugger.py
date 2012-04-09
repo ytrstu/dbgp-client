@@ -28,6 +28,7 @@
 # Authors:
 #    Seung Woo Shin <segv <at> sayclub.com>
 #    Sam Ghods <sam <at> box.net>
+#    Timothy Madden <terminatorul <at> gmail.com>
 
 """
 	debugger.py -- DBGp client: a remote debugger interface to DBGp protocol
@@ -53,10 +54,15 @@ import socket
 import base64
 import traceback
 import xml.dom.minidom
+import urlparse
+import re
+import tempfile
+import urllib
+import atexit
 
 #######################################################################################################################
 #                                                                                                                     #
-# this diagram is little outdated.                                                                                    #
+# this diagram is little outdated (a bit more, actually).                                                             #
 #                                                                                                                     #
 #                                                                                                                     #
 #                          +---[ class Debugger ]-----------+                                                         #
@@ -292,7 +298,7 @@ class StackWindow(VimWindow):
       return str('%-2s %-15s %s:%s' % (      \
           node.getAttribute('level'),        \
           node.getAttribute('where')+fmark,  \
-          node.getAttribute('filename')[7:], \
+          Debugger.parse_file(node.getAttribute('filename')), \
           node.getAttribute('lineno')))
   def on_create(self):
     self.command('highlight CurStack term=reverse ctermfg=White ctermbg=Red gui=reverse')
@@ -335,7 +341,7 @@ class WatchWindow(VimWindow):
       line = str(''.ljust(level*1) + line)
       encoding = node.getAttribute('encoding')
       if encoding == 'base64':
-        line += "'" + base64.decodestring(str(node.firstChild.data)) + "';\n"
+        line += "'" + base64.decodestring(str(node.firstChild.data)).replace("\\", "\\\\").replace("'", "\\'") + "';\n"
       elif encoding == '':
         line += str(node.firstChild.data) + ';\n'
       else:
@@ -356,10 +362,16 @@ class WatchWindow(VimWindow):
 
       name      = node.getAttribute('name')
       fullname  = node.getAttribute('fullname')
+
       if name == '':
-        name = 'EVAL_RESULT'
+	name = fullname
+	if name == '':
+	    name = 'EVAL_RESULT'
+
       if fullname == '':
-        fullname = 'EVAL_RESULT'
+	fullname = name
+	if fullname == '':
+	    fullname = 'EVAL_RESULT'
 
       if self.type == 'uninitialized':
         return str(('%-20s' % name) + " = /* uninitialized */'';")
@@ -393,13 +405,52 @@ class WatchWindow(VimWindow):
       self.buffer.append('/*{{{1*/ => '+mode+': '+arg)
     self.command('normal G')
   def get_command(self):
+    global engine_lang, php_version_maj
+
     line = self.buffer[-1]
     if line[0:17] == '/*{{{1*/ => exec:':
-      print "exec does not supported by xdebug now."
-      return ('none', '')
-      #return ('exec', line[17:].strip(' '))
-    elif line[0:17] == '/*{{{1*/ => eval:':
-      return ('eval', line[17:].strip(' '))
+      # print "currently exec is not supported by xdebug."
+      # return ('none', '')
+      #
+      return ('exec', line[17:].strip(' '))
+    elif line[0:17] == '/*{{{1*/ => eval:' :
+      if engine_lang != 'php' or php_version_maj < 5 :
+	  return ('eval', line[17:].strip(' '))
+      else:
+	# generate a piece of php code to protect and eval() the 
+	# expression from the input line twice (on nested levels)
+        return \
+	(
+	    """eval""",
+	    (
+		"""
+		    eval
+		    (
+			' 
+			try
+			{
+			    return eval
+			    (\\'
+				return """
+				    +
+		    line[17:].strip(' ').replace('\\', '\\\\\\\\').replace("'", "\\\\\\'")
+				    +
+				    """;
+			    \\');
+			}
+			catch (Exception $ex)
+			{
+			    return $ex->getMessage();
+			}
+
+			return NULL;
+
+			'
+		    )
+		"""
+	    )
+	    .strip(' \r\n\t')
+	)
     elif line[0:25] == '/*{{{1*/ => property_get:':
       return ('property_get', line[25:].strip(' '))
     elif line[0:24] == '/*{{{1*/ => context_get:':
@@ -425,6 +476,20 @@ class HelpWindow(VimWindow):
         '\n')
     self.command('1')
 
+tmp_session_files = [ ]
+
+@atexit.register
+def cleanup_tmp_session_files() :
+    global tmp_session_files
+
+    for sess_file in tmp_session_files :
+	try :
+	    os.unlink(sess_file)
+	except :
+	    pass    # keep going on errors
+
+    tmp_session_files = [ ]
+
 class DebugUI:
   """ DEBUGUI class """
   def __init__(self, minibufexpl = 0):
@@ -438,18 +503,23 @@ class DebugUI:
     self.line     = None
     self.winbuf   = {}
     self.cursign  = None
-    self.sessfile = "/tmp/debugger_vim_saved_session." + str(os.getpid())
     self.minibufexpl = minibufexpl
 
   def debug_mode(self):
     """ change mode to debug """
     if self.mode == 1: # is debug mode ?
       return
+
     self.mode = 1
     if self.minibufexpl == 1:
       vim.command('CMiniBufExplorer')         # close minibufexplorer if it is open
+
     # save session
+    fd, self.sessfile = tempfile.mkstemp('.vim', 'sess');
+    os.close(fd)
+    tmp_session_files.append(self.sessfile)
     vim.command('mksession! ' + self.sessfile)
+
     for i in range(1, len(vim.windows)+1):
       vim.command(str(i)+'wincmd w')
       self.winbuf[i] = vim.eval('bufnr("%")') # save buffer number, mksession does not do job perfectly
@@ -467,30 +537,37 @@ class DebugUI:
 
   def normal_mode(self):
     """ restore mode to normal """
-    if self.mode == 0: # is normal mode ?
-      return
+    try:
+	if self.mode == 0: # is normal mode ?
+	  return
 
-    vim.command('sign unplace 1')
-    vim.command('sign unplace 2')
+	vim.command('sign unplace 1')
+	vim.command('sign unplace 2')
 
-    # destory all created windows
-    self.destroy()
+	# destory all created windows
+	self.destroy()
 
-    # restore session
-    vim.command('source ' + self.sessfile)
-    os.system('rm -f ' + self.sessfile)
+	# restore session
+	vim.command('source ' + self.sessfile)
 
-    self.set_highlight()
+	self.set_highlight()
 
 
-    self.winbuf.clear()
-    self.file    = None
-    self.line    = None
-    self.mode    = 0
-    self.cursign = None
+	self.winbuf.clear()
+	self.file    = None
+	self.line    = None
+	self.mode    = 0
+	self.cursign = None
 
-    if self.minibufexpl == 1:
-      vim.command('MiniBufExplorer')         # close minibufexplorer if it is open
+	if self.minibufexpl == 1:
+	  vim.command('MiniBufExplorer')         # close minibufexplorer if it is open
+    finally:
+	if self.sessfile:
+	    # close session file and remove its name from the atexit()
+	    # cleanup list
+	    os.unlink(self.sessfile)
+	    tmp_session_files.remove(self.sessfile)
+	    self.sessfile = None
 
   def create(self):
     """ create windows """
@@ -528,7 +605,7 @@ class DebugUI:
     if file != self.file:
       self.file = file
       self.go_srcview()
-      vim.command('silent edit ' + file)
+      vim.command('silent edit ' + file.replace('%', '\%'))
 
     vim.command('sign place ' + nextsign + ' name=current line='+str(line)+' file='+file)
     vim.command('sign unplace ' + self.cursign)
@@ -566,9 +643,11 @@ class DbgProtocol:
     serv.close()
   def close(self):
     if self.sock != None:
-      self.sock.close()
-      self.sock = None
-    self.isconned = 0
+      try:
+	self.sock.close()
+      finally:
+	self.sock = None
+	self.isconned = 0
   def recv_length(self):
     #print '* recv len'
     length = ''
@@ -630,7 +709,7 @@ class BreakPoint:
     """ remove break point numbered with bno """
     del self.breakpt[bno]
   def find(self, file, line):
-    """ find break point and return bno(breakpoint number) """
+    """ find break point and return bno (breakpoint number) """
     for bno in self.breakpt.keys():
       if self.breakpt[bno]['file'] == file and self.breakpt[bno]['line'] == line:
         return bno
@@ -654,6 +733,9 @@ class BreakPoint:
     """ return list of breakpoint number """
     return self.breakpt.keys()
 
+engine_lang = None
+php_version_maj = None
+
 class Debugger:
   """ Main Debugger class """
 
@@ -676,6 +758,7 @@ class Debugger:
     self.curstack   = 0
     self.laststack  = 0
     self.bptsetlst  = {} 
+    self.bptremlst  = {} 
 
     self.status        = None
     self.max_children  = max_children
@@ -698,6 +781,7 @@ class Debugger:
     self.curstack  = 0
     self.laststack = 0
     self.bptsetlst = {} 
+    self.bptremlst = {} 
 
     self.protocol.close()
 
@@ -707,6 +791,7 @@ class Debugger:
     # log message
     if self.debug:
       self.ui.tracewin.write(str(self.msgid) + ' : send =====> ' + msg)
+
   def recv(self, count=10000):
     """ receive message until response is last transaction id or received count's message """
     while count>0:
@@ -726,6 +811,7 @@ class Debugger:
           return
       except:
         pass
+
   def send_command(self, cmd, arg1 = '', arg2 = ''):
     """ send command (do not receive response) """
     self.msgid = self.msgid + 1
@@ -740,18 +826,23 @@ class Debugger:
   #
   #################################################################################################################
 
+  this_host = socket.gethostbyname_ex(socket.gethostname())
+
   #################################################################################################################
   # Internal message handlers
   #
   def handle_msg(self, res):
-    """ call appropraite message handler member function, handle_XXX() """
+    """ call appropriate message handler member function, handle_XXX() """
     fc = res.firstChild
     try:
       handler = getattr(self, 'handle_' + fc.tagName)
       handler(res)
-    except AttributeError:
+    except AttributeError, exc:
       print 'Debugger.handle_'+fc.tagName+'() not found, please see the LOG___WINDOW'
+      print traceback.format_exc()
+
     self.ui.go_srcview()
+
   def handle_response(self, res):
     """ call appropraite response message handler member function, handle_response_XXX() """
     if res.firstChild.hasAttribute('reason') and res.firstChild.getAttribute('reason') == 'error':
@@ -771,6 +862,27 @@ class Debugger:
     handler(res)
     return
 
+  @classmethod
+  def parse_file(self, fileuri):
+    file_parts = urlparse.urlparse(fileuri)
+
+    if file_parts.scheme == 'file' :
+	# Since DBGp is for remote debugging (and also supports proxies), server should never send a local
+	# URL, but usually this is exactly what it sends.
+	    
+	# If network name in the file URI indicates the current host, convert the URI to a path in 
+	# the file system
+	if file_parts.netloc in [ '', 'localhost', 'localhost.localdomain', self.this_host[0] ] + self.this_host[1] + self.this_host[2] \
+			or re.match('^127(\.[0-9]{1,3}){3}$', file_parts.netloc) :
+	    fileuri = file_parts.path
+	    if re.match('^/[a-zA-Z][|:]/.*$', fileuri) :
+		# This is a Windows file URL, like file:///D:/dir/path/file
+		fileuri = fileuri[1:]
+	# A user-defined URL maping should be added here, for vim to source files mapped from a remote
+	# debugger
+
+    return urllib.unquote(fileuri)
+
   def handle_init(self, res):
     """handle <init> tag
     <init appid="7035" fileuri="file:///home/segv/htdocs/index.php" language="PHP" protocol_version="1.0">
@@ -788,7 +900,10 @@ class Debugger:
       </copyright>
     </init>"""
    
-    file = res.firstChild.getAttribute('fileuri')[7:]
+    global engine_lang
+
+    engine_lang = res.firstChild.getAttribute('language').lower()
+    file = self.parse_file(res.firstChild.getAttribute('fileuri'))
     self.ui.set_srcview(file, 1)
 
   def handle_response_error(self, res):
@@ -820,7 +935,7 @@ class Debugger:
 
       self.stacks    = []
       for s in stacks:
-        self.stacks.append( {'file':  s.getAttribute('filename')[7:], \
+        self.stacks.append( {'file':  self.parse_file(s.getAttribute('filename')), \
                              'line':  int(s.getAttribute('lineno')),  \
                              'where': s.getAttribute('where'),        \
                              'level': int(s.getAttribute('level'))
@@ -842,6 +957,7 @@ class Debugger:
       return
     else:
       print res.toprettyxml()
+
   def handle_response_step_over(self, res):
     """handle <response command=step_over> tag
     <response command="step_over" reason="ok" status="break" transaction_id="1 "/>"""
@@ -851,6 +967,7 @@ class Debugger:
       return
     else:
       print res.toprettyxml()
+
   def handle_response_step_into(self, res):
     """handle <response command=step_into> tag
     <response command="step_into" reason="ok" status="break" transaction_id="1 "/>"""
@@ -860,15 +977,17 @@ class Debugger:
       return
     else:
       print res.toprettyxml()
+
   def handle_response_run(self, res):
     """handle <response command=run> tag
     <response command="step_over" reason="ok" status="break" transaction_id="1 "/>"""
     if res.firstChild.hasAttribute('status'):
       self.status = res.firstChild.getAttribute('status')
       return
+
   def handle_response_breakpoint_set(self, res):
     """handle <response command=breakpoint_set> tag
-    <responsponse command="breakpoint_set" id="110180001" transaction_id="1"/>"""
+    <response command="breakpoint_set" id="110180001" transaction_id="1"/>"""
     if res.firstChild.hasAttribute('id'):
       tid = int(res.firstChild.getAttribute('transaction_id'))
       bno = self.bptsetlst[tid]
@@ -878,18 +997,42 @@ class Debugger:
       #except:
       #  print "can't find bptsetlst tid=", tid
       #  pass
+
+  def handle_response_breakpoint_remove(self, res) :
+    """handle <response command="breakpoint_remove" transaction_id="####"/>"""
+    if res.firstChild.hasAttribute('transaction_id') :
+	tid = int(res.firstChild.getAttribute('transaction_id'))
+	print self.bptremlst
+	del self.bptremlst[tid]
+
   def handle_response_eval(self, res):
     """handle <response command=eval> tag """
+    global php_version_maj
+
+    if engine_lang == 'php' and php_version_maj is None :
+	# This must be the first eval command, invoked after connect to read
+	# php version
+	for cnode in res.getElementsByTagName('response')[0].getElementsByTagName('property')[0].childNodes :
+	    if cnode.nodeType == cnode.CDATA_SECTION_NODE :
+		php_version_maj = int(cnode.data)
+		print "PHP major version:", php_version_maj
+		# replacing the method would be appropriate here
+		break
+
     self.ui.watchwin.write_xml_childs(res)
+
   def handle_response_property_get(self, res):
     """handle <response command=property_get> tag """
     self.ui.watchwin.write_xml_childs(res)
+
   def handle_response_context_get(self, res):
     """handle <response command=context_get> tag """
     self.ui.watchwin.write_xml_childs(res)
+
   def handle_response_feature_set(self, res):
     """handle <response command=feature_set> tag """
     self.ui.watchwin.write_xml_childs(res)
+
   def handle_response_default(self, res):
     """handle <response command=context_get> tag """
     print res.toprettyxml()
@@ -912,18 +1055,26 @@ class Debugger:
   def command(self, cmd, arg1 = '', arg2 = ''):
     """ general command sender (receive response too) """
     if self.running == 0:
-      print "Not connected\n"
+      print "Not connected.\n"
       return
     msgid = self.send_command(cmd, arg1, arg2)
     self.recv()
     return msgid
+
   def run(self):
     """ start debugger or continue """
+
+    global php_version_maj, engine_lang
+
     if self.protocol.isconnected():
       self.command('run')
-      if self.status != 'stopped':
+      if self.status != 'stopped' and self.status != 'stopping':
         self.command('stack_get')
     else:
+
+      php_version_maj = None
+      engine_lang = None
+
       self.clear()
       self.protocol.accept()
       self.ui.debug_mode()
@@ -935,6 +1086,9 @@ class Debugger:
       self.command('feature_set', '-n max_children -v ' + self.max_children)
       self.command('feature_set', '-n max_data -v ' + self.max_data)
       self.command('feature_set', '-n max_depth -v ' + self.max_depth)
+      if engine_lang == 'php' :
+	# get php version, for version-specific workaround on eval command
+	self.command('eval', '', '(int)phpversion()')	# this will set php_version_maj upon response
 
       self.command('step_into')
 
@@ -971,7 +1125,7 @@ class Debugger:
       self.ui.set_srcview(self.stacks[self.curstack]['file'], self.stacks[self.curstack]['line'])
 
   def mark(self, exp = ''):
-    (row, rol) = vim.current.window.cursor
+    (row, col) = vim.current.window.cursor
     file       = vim.current.buffer.name
 
     bno = self.breakpt.find(file, row)
@@ -980,7 +1134,8 @@ class Debugger:
       self.breakpt.remove(bno)
       vim.command('sign unplace ' + str(bno))
       if self.protocol.isconnected():
-        self.send_command('breakpoint_remove', '-d ' + str(id))
+        msgid = self.send_command('breakpoint_remove', '-d ' + str(id))
+	self.bptremlst[msgid] = bno
         self.recv()
     else:
       bno = self.breakpt.add(file, row, exp)
@@ -1009,7 +1164,7 @@ class Debugger:
       print cmd, '--', expr
     elif cmd == 'eval':
       self.command('eval', '', expr)
-      print cmd, '--', expr
+      # print cmd, '--', expr
     elif cmd == 'property_get':
       self.command('property_get', '-d %d -n %s' % (self.curstack,  expr))
       print cmd, '-n ', expr
@@ -1065,13 +1220,17 @@ def debugger_init(debug = 0):
 def debugger_command(msg, arg1 = '', arg2 = ''):
   try:
     debugger.command(msg, arg1, arg2)
-    if debugger.status != 'stopped':
+    if debugger.status != 'stopped' and debugger.status != 'stopping' :
       debugger.command('stack_get')
+    else :
+      debugger.stop()
+      print "Debug session ended."
   except:
     debugger.ui.tracewin.write(sys.exc_info())
     debugger.ui.tracewin.write("".join(traceback.format_tb( sys.exc_info()[2])))
     debugger.stop()
-    print 'Connection closed, stop debugging', sys.exc_info()
+    print 'Connection closed, stop debugging'
+    print traceback.format_exc()
 
 def debugger_run():
   try:
@@ -1080,7 +1239,8 @@ def debugger_run():
     debugger.ui.tracewin.write(sys.exc_info())
     debugger.ui.tracewin.write("".join(traceback.format_tb( sys.exc_info()[2])))
     debugger.stop()
-    print 'Connection closed, stop debugging', sys.exc_info()
+    print 'Connection closed, stop debugging'
+    print traceback.format_exc()
 
 def debugger_watch_input(cmd, arg = ''):
   try:
@@ -1109,7 +1269,8 @@ def debugger_property(name = ''):
     debugger.ui.tracewin.write(sys.exc_info())
     debugger.ui.tracewin.write("".join(traceback.format_tb( sys.exc_info()[2])))
     debugger.stop()
-    print 'Connection closed, stop debugging', sys.exc_info()
+    print 'Connection closed, stop debugging'
+    print traceback.format_exc()
 
 def debugger_mark(exp = ''):
   try:
@@ -1118,7 +1279,8 @@ def debugger_mark(exp = ''):
     debugger.ui.tracewin.write(sys.exc_info())
     debugger.ui.tracewin.write("".join(traceback.format_tb( sys.exc_info()[2])))
     debugger.stop()
-    print 'Connection closed, stop debugging', sys.exc_info()
+    print 'Connection closed, stop debugging'
+    print traceback.format_exc()
 
 def debugger_up():
   try:
@@ -1127,7 +1289,8 @@ def debugger_up():
     debugger.ui.tracewin.write(sys.exc_info())
     debugger.ui.tracewin.write("".join(traceback.format_tb( sys.exc_info()[2])))
     debugger.stop()
-    print 'Connection closed, stop debugging', sys.exc_info()
+    print 'Connection closed, stop debugging'
+    print traceback.format_exc()
 
 def debugger_down():
   try:
@@ -1136,7 +1299,8 @@ def debugger_down():
     debugger.ui.tracewin.write(sys.exc_info())
     debugger.ui.tracewin.write("".join(traceback.format_tb( sys.exc_info()[2])))
     debugger.stop()
-    print 'Connection closed, stop debugging', sys.exc_info()
+    print 'Connection closed, stop debugging'
+    print traceback.format_exc()
 
 def debugger_quit():
   global debugger

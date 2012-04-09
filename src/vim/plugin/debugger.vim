@@ -25,7 +25,10 @@
 "				SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 " Name Of File: debugger.vim, debugger.py
 "  Description: remote debugger interface to DBGp protocol
-"   Maintainer: Sam Ghods <sam <at> box.net>
+"   Maintainer:	Timothy Madden <terminatorul <at> gmail.com>
+"		Original authors:
+"		    Sam Ghods <sam <at> box.net>
+"		    Seung Woo Shin <segv <at> sayclub.com>
 "  Last Change: June 18, 2007
 "          URL: http://www.vim.org/scripts/script.php?script_id=1929
 "      Version: 1.1.1
@@ -116,16 +119,31 @@ if !has("python")
     finish
 endif
 
-" Load debugger.py either from the runtime directory (usually
-" /usr/local/share/vim/vim71/plugin/ if you're running Vim 7.1) or from the
-" home vim directory (usually ~/.vim/plugin/).
-if filereadable($VIMRUNTIME."/plugin/debugger.py")
-  pyfile $VIMRUNTIME/plugin/debugger.py
-elseif filereadable($HOME."/.vim/plugin/debugger.py")
-  pyfile $HOME/.vim/plugin/debugger.py
+" Load debugger.py from any directory in runtime path,
+" or the current script directory (<sfile>:h)
+" Escape dir name before adding to rtp: replace '\' with '\\' and ',' with '\,'
+let s:external_script = 
+    \ split
+    \ (
+    \	globpath
+    \	(
+    \	    substitute(substitute(expand('<sfile>:h'), '\v\\', '\\', 'g'), '\C\v,', '\,', 'g') 
+    \	        .
+    \	    ','
+    \	        .
+    \	    &runtimepath,
+    \	    'plugin/**/' . expand('<sfile>:t:r') . '.py'
+    \	),
+    \	'\n'
+    \ )
+
+if len(s:external_script) > 0
+    execute "pyfile " . s:external_script[0]
 else
-  call confirm('debugger.vim: Unable to find debugger.py. Place it in either your home vim directory or in the Vim runtime directory.', 'OK')
+    call confirm(expand('<sfile>:t').': Unable to find ' . expand('<sfile>:t:r') . '.py in &runtimepath.', '&Ok')
+    finish
 endif
+
 
 map <F1> :python debugger_resize()<cr>
 map <F2> :python debugger_command('step_into')<cr>
