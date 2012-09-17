@@ -9,6 +9,7 @@ DBGpClient.vba
 DBGpClient.vmb
 DBGpClient.vba.zip
 DBGpClient.vmb.zip
+vim
 *.sw[op]
 *~
 *.bak
