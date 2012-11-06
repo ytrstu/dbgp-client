@@ -1,0 +1,890 @@
+#!/usr/bin/vim -nNesc:let&verbose=1|let&viminfo=''|source%|echo''|qall!
+"<?php $cmd = "vim -V1 -i NONE -u NORC -U NONE -nNes " . escapeshellarg(
+"-csource%|echo\"\"|qall!"); for ($i = 0; $i < $argc; $i++) { $cmd .=
+" " . escapeshellarg($argv[$i]); } passthru($cmd, $retcode); exit($retcode); ?>
+"
+" Build a vimball archive with the files given in VIMBALL_FILES
+" environment variable or on the command line.
+"
+" The script is also a valid php file, and will have php invoke vim with all
+" the passed-in arguments.
+"
+"     Licence: This file is placed in the public domain
+"	 File: mkvimball.vim
+"      Author: Timothy Madden <terminatorul <at> gmail.com>
+"  Maintainer: Timothy Madden <terminaotrul <at> gmail.com>
+"       Usage:
+"		<sfile> VimballName [srcfiles...]
+"		    or
+"		php <sfile> VimballName [srcfiles...]
+"		    or
+"		vim \
+"		    -V1 -i NONE -u NORC \
+"		    -NesS <sfile> -c"qall!" \
+"			VimballName [srcfiles...]
+"		    or
+"		VIMBALL_FILES="srcfiles..." <sfile>
+"
+"		That is, files to be included in the vimball can
+"		be listed on the command line or in the SOURCE
+"		environment variable.
+"		Other usage:
+"		vim -V1 -i NONE -nNesS % -c 'qall!' \
+"		    <sfile> -- --[un]register-file-type --system [.ext]
+"
+"		vim -V1 -i NONE -nNesS % -c 'qall!' \
+"		    <sfile> -- --[un]register-file-type --local [.ext]
+"
+"		vim -V1 -i NONE -nNesS % -c 'qall!' \
+"		    <sfile> -- --write-cmd-script
+" Last Change: nov 4, 2012
+"     Version: 1.0
+"
+" GetLatestVimScripts: 4219 1 :AutoInstall: mkvimball.vim
+"
+" Command line options are passed to vim, then script can use the Vim
+" arglist to process given files.
+"
+
+" Sends a change notification to Windows Explorer. Requires windows PowerShell for
+" access to WinAPI functions SendMessageTimeout() and SHChangeNotify(). Without
+" PowerShell the function only displays a message to the user.
+function { (exists('s:') ? 's:' : '') . 'MkVimball_Vim_ExplorerChangeNotify' }() abort
+    let l:cs_refresh_script =
+	\ [
+	\  'throw new System.NotImplementedException("Explorer refresh not implmented."); // cs script contents marker: 109df5c5a6e4ea1b6b15ff06696822cba310586e'
+	\ ]
+
+    let l:ps_refresh_script =
+	\ [
+	\   'Write-Host "Explorer refresh not implemented" # ps script contents marker: 1503407dcdac31e607788c18ba2590eead425d61'
+	\ ]
+
+    if len(l:cs_refresh_script) == 1 || len(l:ps_refresh_script) == 1
+	echoerr "Failed to refresh Windows Explorer icons: `mkvimball` script should be installed or processed by Makefile with the make "
+		\ "command before it can be used."
+	return -1
+    endif
+
+    " trim the .ps1 script, for concatenation on the command line
+    let l:ln = 0
+    while l:ln < len(l:ps_refresh_script)
+	let l:ps_refresh_script[l:ln] =
+	    \ substitute
+	    \   (
+	    \	    substitute(l:ps_refresh_script[l:ln], '\m^\s*', '', ''),
+	    \	    '\v(#.*|\s*)$',
+	    \	    '',
+	    \	    ''
+	    \   )
+
+	if l:ps_refresh_script[l:ln] =~ '\m^\s*$'
+	    call remove(l:ps_refresh_script, l:ln)
+	else
+	    let l:ln += 1
+	endif
+    endwhile
+
+    " write script file to disk
+    let l:cs_script_file = fnamemodify(tempname(), ':r') . '.shellnotify.tmp.cs'
+    try
+	if writefile(l:cs_refresh_script, l:cs_script_file) < 0
+	    echoerr "Failed to write temporary script file to refresh Explorer icons."
+	    return -1
+	endif
+
+	let l:cmdline =
+	    \ 'powershell -Version 1.0 -NoLogo -NonInteractive -NoProfile -Command '
+	    \   .
+	    \ '$ErrorActionPreference=''stop'';'
+	    \	.
+	    \ '$cs_file=''' . l:cs_script_file . ''';'
+	    \   .
+	    \ substitute(substitute(join(l:ps_refresh_script, ''), '\v(\\+)"', '\1\1"', 'g'), '\V"', '\\"', 'g')
+
+	echo l:cmdline
+	let l:cmd_output = system(l:cmdline)
+
+	if v:shell_error != 0
+	    " A similar python script (or other tools/languages) could be tried here
+	    echomsg l:cmd_output
+	    echomsg " "
+	    echomsg " "
+	    echomsg
+		\ '    Restart Windows shell (on XP: at the shutdown prompt press: Ctrl+Alt+Shfit+Esc, Ctrl+Shift+Esc, Alt+F, N), or Log Off, '
+		\   .
+		\ 'to refresh Windows Explorer icons.'
+	    echomsg " "
+	endif
+    finally
+	let l:tmp_del_exitcode = delete(l:cs_script_file)
+
+	if l:tmp_del_exitcode != 0
+	    echoerr "Failed to delete temporary script " . l:cs_script_file . '.'
+	endif
+    endtry
+endfunction
+
+" Modify PATHEXT environment variable to add/remove the .vim/.exim extension
+function { (exists('s:') ? 's:' : '') . 'MkVimball_Vim_UpdatePATHEXT' }(root_key, add_file_type, file_type) abort
+    " File association has now been created, add file extension to
+    " %PATHEXT%
+    let l:setenv_script_contents =
+	\ [
+	\   'throw "Not implemented"; // setenv script contents marker: 617493c406a7202032244442ec727c0a93ce1bf6'
+	\ ]
+
+    if len(l:setenv_script_contents) == 1
+	echoerr "Failed to update %PATHEXT%: Not implemented: `mkvimball` script should be installed or processed by Makefile with the make "
+		\ "command before it can be used."
+	return -1
+    endif
+
+    let l:setenv_script_file = fnamemodify(tempname(), ':r') . '.mkvimball.setenv.tmp.js'
+    try
+	let l:write_errcode = writefile(l:setenv_script_contents, l:setenv_script_file)
+
+	if l:write_errcode < 0
+	    echoerr "Failed to write temporary script file to modify %PATHEXT%."
+	    return -1
+	endif
+
+	let l:cmdline =
+	    \	'CScript //NoLogo //E:JScript "' . l:setenv_script_file . '" '
+	    \	    .
+	    \	(a:add_file_type == 0 ? '-' : '') . (a:root_key == 'HKLM' ? 'SYSTEM' : 'USER')
+	    \	    .
+	    \	' "' . toupper(a:file_type) . '"'
+	echo l:cmdline
+	let l:cmd_output = system(l:cmdline)
+
+	if v:shell_error != 0
+	    echoerr "Failed to update %PATHEXT%: " . l:cmd_output . '.'
+	    return -1
+	endif
+    finally
+	let l:tmp_del_exitcode = delete(l:setenv_script_file)
+
+	if l:tmp_del_exitcode != 0
+	    echoerr "Failed to delete temporary script " . l:setenv_script_file . " for %PATHEXT% update."
+	endif
+    endtry
+endfunction
+
+" Populate Windows registry keys to associate vim executable with vim
+" script files (default .vim-cmd)
+function { (exists('s:') ? 's:' : '') . 'MkVimball_Vim_WriteAssociationRegKeys' }(root_key, env_install_dir, file_type) abort
+    " Create new shell verb 'Run' for .vim-cmd files
+    let l:cmdline =
+	\	'reg add "' . a:root_key . '\Software\Classes\VimCmdScriptFile\shell\Run\command" /ve /t REG_EXPAND_SZ '
+	\	    .
+	\	'/d '
+	\	    .
+	\	    '^^^"\^^^"' . substitute(a:env_install_dir, '\V^', '^^^', 'g') . '\VimCmdScript.cmd\^^^" '
+	\		.
+	\	    '--explicit -V1 -i NONE -u NORC -U NONE -nNesS \^^^"%1\^^^" -c \^^^"echo '''' ^^^| qall!\^^^" %*^^^" '
+	\	    .
+	\	'/f'
+    echo l:cmdline
+    let l:cmd_output = system(l:cmdline)
+
+    if v:shell_error == 0
+	let l:cmdline =
+	    \   'reg add "' . a:root_key . '\Software\Classes\VimCmdScriptFile\shell\run" /ve /t REG_SZ /d "R&un" /f'
+	echo l:cmdline
+	let l:cmd_output = system(l:cmdline)
+    endif
+    if v:shell_error == 0
+	let l:cmdline =
+	    \   'reg add "' . a:root_key . '\Software\Classes\VimCmdScriptFile\shell" /ve /t REG_SZ /d "run" /f'
+	echo l:cmdline
+	let l:cmd_output = system(l:cmdline)
+    endif
+    if v:shell_error == 0
+	" Add the Vim icon to the new file type
+	let l:cmdline =
+	    \	'reg add "' . a:root_key . '\SOFTWARE\Classes\VimCmdScriptFile\DefaultIcon" /ve /t REG_EXPAND_SZ '
+	    \	    .
+	    \	'/d ^^^"' . substitute(a:env_install_dir, '\V^', '^^^', 'g') . '\vim.exe,0^^^" /f'
+	echo l:cmdline
+	let l:cmd_output = system(l:cmdline)
+    endif
+    if v:shell_error == 0
+	let l:cmdline =
+	    \   'reg add "' . a:root_key . '\Software\Classes\VimCmdScriptFile" /ve /t REG_SZ /d "Vim cmd script (ex script)" /f'
+	echo l:cmdline
+	let l:cmd_output = system(l:cmdline)
+    endif
+
+    if v:shell_error == 0
+	if a:root_key == 'HKLM'
+	    " Remove the default verb 'open' created by the system command
+	    " FType
+	    let l:cmdline = 'reg delete "' . a:root_key . '\Software\Classes\VimCmdScriptFile\shell\open" /f'
+	    echo l:cmdline
+	    let l:cmd_output = system(l:cmdline)
+	endif
+
+	let l:cmdline =
+	    \      'reg add "' . a:root_key . '\Software\Classes\' . a:file_type . '" '
+	    \   	.
+	    \      '/ve /t REG_SZ /d "VimCmdScriptFile" /f '
+	echo l:cmdline
+	let l:cmd_output = system(l:cmdline)
+    endif
+
+    " Add Content-Type for the new file
+    if v:shell_error == 0
+	let l:cmdline =
+	    \	    'reg add "' . a:root_key . '\Software\Classes\' . a:file_type . '" '
+	    \		.
+	    \	    '/v "Content Type" /t REG_SZ /d "text/plain" /f'
+	echo l:cmdline
+	let l:cmd_output = system(l:cmdline)
+    endif
+
+    if v:shell_error == 0
+	let l:cmdline =
+	    \	    'reg add "' . a:root_key . '\Software\Classes\' . a:file_type . '" '
+	    \		.
+	    \	    '/v "PerceivedType"	/t REG_SZ /d text /f'
+	echo l:cmdline
+	let l:cmd_output = system(l:cmdline)
+    endif
+
+    if v:shell_error == 0
+	return 0
+    else
+	echoerr "Failed to create new file association. "  . l:cmd_output
+	return -1
+    endif
+endfunction
+
+function { (exists('s:') ? 's:' : '') . 'MkVimball_Vim_Main'}(script_name, ...) abort
+    let l:save_cpo = &cpoptions
+    set cpoptions&
+
+    " get command name
+    let l:script_name = fnamemodify(a:script_name, ':t')
+    if l:script_name == ''
+	let l:cmd_name = 'vim -V1 -i NONE -nNesS mkvimball.vim'
+    else
+	let l:cmd_name = l:script_name
+    endif
+
+    " get first file name from the command line
+    if argc() < 1 && (a:0 == 0 || a:1 == 0)
+	echoerr "    Usage: " . l:cmd_name . " Vimball srcfiles..."
+	if l:script_name == ''
+	    echo ""
+	endif
+
+	let &cpoptions = l:save_cpo
+	return
+    else
+	" check if arg(0) exists and is the same as this script
+	" escape the file name, for use with glob():
+	"   escape backslashes with another backslash
+	"   escape pattern characters [, * and ? as [[], [*] and [?]
+	"	the pattern character ] no longer needs an escape now
+	let l:first_arg = argv(0)
+	if fnameescape('\') == '\\'
+	    let l:first_arg = substitute(l:first_arg, '\m\\', '\\\\', 'g')
+	endif
+	let l:first_arg = substitute(l:first_arg, '\m\[', '[[]', 'g')
+	let l:first_arg = substitute(l:first_arg, '\m(\*|\?)', '[\1]', 'g')
+
+	" check if given file exists with glob()
+	if glob(l:first_arg) == ''
+	    let l:first_arg_idx = 0
+	else
+	    " file exists, compare with current script file name
+	    let l:abs_file_path = fnamemodify(l:first_arg, ':p')
+	    let l:abs_script_path = a:script_name == '' ? '' : fnamemodify(a:script_name, ':p')
+
+	    if l:abs_file_path == l:abs_script_path
+		" script is being sourced from the shebang line
+		if argc() < 2
+		    echoerr "    Usage: " . l:cmd_name . " Vimball srcfiles..."
+		    if l:script_name == ''
+			echo ""
+		    endif
+
+		    let &cpoptions = l:save_cpo
+		    return
+		endif
+
+		let l:first_arg_idx = 1
+	    else
+		let l:first_arg_idx = 0
+	    endif
+	endif
+    endif
+
+    " Content for generated wrapper scripts used for cmd.exe on Windows
+    " <sfile>.cmd included here during build, line by line
+    let l:cmd_script_contents =
+	\ [
+	\   "@Exit /B 255 && Rem cmd script contents marker: c6c4b8449b050fd4a288662c85ab3043343541e3"
+	\ ]
+
+    " <sfile>.js included here during build, line by line
+    let l:js_script_contents =
+	\ [
+	\   "throw 'Not implmented'; // js script contents marker: 28e4f0caa6040c6e9b5f06577d4bfd4f5d1cd858"
+	\ ]
+
+    if len(l:cmd_script_contents) <= 1 || len(l:js_script_contents) <= 1
+	" mkvimball.vim script has somehow not been processed/installed by the Makefile
+	echoerr
+	    \ (a:script_name == '' ? 'mkvimball.vim' : a:script_name)
+	    \	.
+	    \ " should be installed or processed by Makefile with the "
+	    \	.
+	    \ "`make` command before it can be used."
+	return
+    endif
+
+    " parse command line
+    if argv(l:first_arg_idx) == '--write-cmd-script'
+	" Write a wrapper .cmd file, for Windows cmd.exe, (and a .js file) that invokes vim with this
+	" script and all arguments
+	if a:script_name == ''
+	    echoerr "Current script name not known."
+
+	    let &cpoptions = l:save_cpo
+	    return
+	endif
+
+	if
+	    \ writefile(l:js_script_contents, a:script_name . ".js") < 0
+	    \	||
+	    \ writefile(l:cmd_script_contents, a:script_name . ".cmd") < 0
+	\
+	    echoerr "Failed to write wrapper scripts " . a:script_name . ".js and " . a:script_name . ".cmd]"
+	else
+	    :	" Wrapper scripts written
+	endif
+
+	let &cpoptions = l:save_cpo
+	return
+    elseif argv(l:first_arg_idx) == '--register-file-type' || argv(l:first_arg_idx) == '--unregister-file-type'
+	if $OS == '' || $OS !~ '\mWindows.*'
+	    echoerr 'File associations are used only on Microsoft Windows operating systems.'
+	    let &cpoptions = l:save_cpo
+	    return
+	endif
+
+	let l:file_type = '.exim'
+	if argc() > l:first_arg_idx + 1
+	    if argv(l:first_arg_idx + 1) == '--user'
+		let l:per_user = 1
+		if exists('$LOCALAPPDATA')
+		    let l:install_dir = $LOCALAPPDATA . '\VimPlugins\mkvimball'
+		    let l:env_install_dir = '%^LOCAL^APP^DATA^%\VimPlugins\mkvimball'
+		else
+		    if exists('$APPDATA')
+			let l:install_dir = $APPDATA . '\VimPlugins\mkvimball'
+			let l:env_install_dir = '%^APP^DATA^%\VimPlugins\mkvimball'
+		    else
+			echoerr "%LOCALAPPDATA% or %APPDATA% directory not found."
+			let &cpoptions = l:save_cpo
+			return
+		    endif
+		endif
+	    else
+		if argv(l:first_arg_idx + 1) == '--system'
+		    if l:first_arg_idx + 3 < argc()
+			let l:elevate = argv(l:first_arg_idx + 3) != '--elevated'
+		    else
+			let l:elevate = 1
+		    endif
+		    let l:per_user = 0
+		    let l:cmdline = 'Echo.%ProgramFiles(x86)%'
+		    echo l:cmdline
+		    let l:cmd_output = system(l:cmdline)
+		    let l:multiarch =
+			\ (
+			\   v:shell_error != 0
+			\	||
+			\   l:cmd_output !~ '\V\c%ProgramFiles(x86)%'
+			\  )
+		    let l:needs_multi_arch_selector = 0
+		    if l:multiarch
+			if exists('$CommonProgramW6432')
+			    let l:install_dir = $CommonProgramW6432 . '\VimPlugins\mkvimball'
+			    let l:env_install_dir = '%^Common^Program^W6432^%\VimPlugins\mkvimball'
+			elseif exists('$ProgramW6432')
+			    let l:install_dir = $ProgramW6432 . '\Common Files\VimPlugins\mkvimball'
+			    let l:env_install_dir = '%^Program^W6432^%\Common Files\VimPlugins\mkvimball'
+			else
+			    let l:needs_multi_arch_selector = 1
+			endif
+		    endif
+
+		    if !l:multiarch || l:needs_multi_arch_selector
+			if exists('$CommonProgramFiles')
+			    let l:install_dir = $CommonProgramFiles . '\VimPlugins\mkvimball'
+			    if l:needs_multi_arch_selector
+				let l:env_install_dir = l:install_dir
+			    else
+				let l:env_install_dir = '%^Common^Program^Files^%\VimPlugins\mkvimball'
+			    endif
+			else
+			    if exists('$ProgramFiles')
+				let l:install_dir = $ProgramFiles . '\Common Files\VimPlugins\mkvimball'
+				if l:needs_multi_arch_selector
+				    let l:env_install_dir = l:install_dir
+				else
+				    let l:env_install_dir = '%^Program^Files^%\Common Files\VimPlugins\mkvimball'
+				endif
+			    else
+				echoerr "%CommonProgramFiles% directory not found."
+				let &cpoptions = l:save_cpo
+				return
+			    endif
+			endif
+		    endif
+		else
+		    echoerr "    Syntax: " . a:script_name . " -- --[un]register-file-type { --user | --system } .extension "
+		    let &cpoptions = l:save_cpo
+		    return
+		endif
+	    endif
+	else
+	    echoerr "    Syntax: " . a:script_name . " -- --[un]register-file-type { --user | --system } .extension "
+	    let &cpoptions = l:save_cpo
+	    return
+	endif
+
+	" get extension from the command line
+	if argc() > l:first_arg_idx + 2
+	    let l:file_type = argv(l:first_arg_idx + 2)
+	endif
+
+	if l:per_user == 0 && l:elevate
+	    let l:elevate_script =
+		\ [
+		\   'throw "Not implemented"; // checkElevate script marker: 50b5dc8a71e22da68cfc83bc1904bdbe2297720e'
+		\ ]
+
+	    if len(l:elevate_script) <= 1
+		" mkvimball.vim script has somehow not been processed/installed by the Makefile
+		echoerr
+		    \ (a:script_name == '' ? 'mkvimball.vim' : a:script_name)
+		    \	.
+		    \ " should be installed or processed by Makefile with the "
+		    \	.
+		    \ "`make` command before it can be used."
+		return
+	    endif
+
+	    " write and invoke the checkElevate.js script
+	    let l:checkElevateScript = fnamemodify(tempname(), ':r') . '.checkElevate.tmp.js'
+	    if writefile(l:elevate_script, l:checkElevateScript) < 0
+		echoerr "Failed to write wrapper script " . l:checkElevateScript . "."
+		let &cpoptions = l:save_cpo
+		return
+	    endif
+
+	    try
+		unlet! l:vimExecutable
+		let l:vimExecutable = split($PATH, ';')
+		let l:vimExe = l:vimExecutable[len(l:vimExecutable)-1] . "/vim.exe"
+		unlet l:vimExecutable
+		let l:vimExecutable = l:vimExe
+		unlet l:vimExe
+
+		let l:cmd_line =
+		    \ 'CScript //NoLogo "'
+		    \	.
+		    \ l:checkElevateScript
+		    \	.
+		    \ '" ^^^| ' . l:vimExecutable . ' ^^^| -i NONE -u NORC -U NONE -V1 -nNesS % '
+		    \	.
+		    \ '--cmd "execute ''redir! > '' . $TEMP. ''\mkvimball.exim.log.txt''" '
+		    \	.
+		    \ '-c "if len(v:errmsg)|call input(''Press Enter'')|endif|qall!" '
+		    \	.
+		    \ '-- "' . fnamemodify(a:script_name, ':p') . '" '
+		    \	.
+		    \ argv(l:first_arg_idx) . ' ' . (l:per_user ? '--user' : '--system')
+		    \	.
+		    \ ' "' . l:file_type . '" --elevated'
+		echomsg l:cmd_line
+		let l:cmd_output = system(l:cmd_line)
+
+		if v:shell_error == 0
+		    " New elevated process has been invoked, current process
+		    " may exit
+		    let &cpoptions = l:save_cpo
+		    return
+		else
+		    " Exit code 197 from the checkElevate script indicates the
+		    " current process is already elevated and should continue.
+		    if v:shell_error != 197
+			echomsg l:cmd_output
+		    endif
+		endif
+	    finally
+		let l:tmp_del_exitcode = delete(l:checkElevateScript)
+
+		if l:tmp_del_exitcode != 0
+		    echoerr "Failed to delete temporary script " . l:checkElevateScript . " for elevation."
+		endif
+	    endtry
+	endif
+
+	if argv(l:first_arg_idx) == '--register-file-type'
+	    " Create install dir
+	    if isdirectory(l:install_dir)
+		: " already exists
+	    else
+		if exists('*mkdir')
+		    if mkdir(l:install_dir, 'p')
+			: " Success
+		    else
+			echoerr "Failed to create install directory " . l:install_dir
+		    endif
+		else
+		    call system("cd .")	    " reset v:shell_error
+		    if !isdirectory(fnamemodify(l:install_dir, ':h'))
+			execute ":!mkdir " . fnameescape(fnamemodify(l:install_dir, ':h'))
+		    endif
+		    if v:shell_error == 0
+			execute ":!mkdir " . fnameescape(l:install_dir)
+		    endif
+		    if v:shell_error != 0
+			echoerr "Failed to create install directory " . l:install_dir
+			let &cpoptions = l:save_cpo
+			return
+		    endif
+		endif
+	    endif
+
+	    " Write the wrapper files in the install dir
+	    if
+		\ writefile(l:js_script_contents, l:install_dir . "/VimCmdScript.js")
+		\   ||
+		\ writefile(l:cmd_script_contents, l:install_dir . "/VimCmdScript.cmd")
+	    \
+		echoerr "Failed to write wrapper scripts in " l:install_dir
+		let &cpoptions = l:save_cpo
+		return
+	    endif
+
+	    " Copy the Vim executable file in the install dir (for the Vim
+	    " icon)
+	    unlet! l:vimExecutable
+	    let l:vimExecutable = split($PATH, ';')
+	    let l:vimExe = l:vimExecutable[len(l:vimExecutable)-1] . "/vim.exe"
+	    unlet l:vimExecutable
+	    let l:vimExecutable = l:vimExe
+	    unlet l:vimExe
+
+	    if filereadable(l:vimExecutable)
+		let l:vimFileList = readfile(l:vimExecutable, 'b')
+		if writefile(l:vimFileList, l:install_dir . '/vim.exe', 'b')
+		    echoerr "Failed to write " . l:install_dir . "/vim.exe"
+		    let &cpoptions = l:save_cpo
+		    return
+		else
+		    unlet l:vimExecutable " successfully copied
+		endif
+	    else
+		echoerr "Can not find Vim executable " . l:vimExecutable
+		let &cpoptions = l:save_cpo
+		return
+	    endif
+
+	    " Create the new file associations
+	    let l:reg_code = -1
+
+	    if l:per_user
+		let l:reg_code =  { (exists('s:') ? 's:' : '') . 'MkVimball_Vim_WriteAssociationRegKeys' }
+		    \ ('HKCU', l:env_install_dir, l:file_type)
+	    else
+		let l:cmdline =
+		    \	    "FType "
+		    \		.
+		    \	    'VimCmdScriptFile=^"' . l:env_install_dir . '\VimCmdScript.cmd^" '
+		    \		.
+		    \	    '--explicit -V1 -i NONE -u NORC -U NONE -nNesS "%1" -c "echo '''' | qall!" %*'
+		echo l:cmdline
+		let l:cmd_output = system(l:cmdline)
+		if v:shell_error == 0
+		    let l:cmdline = "Assoc \"" . l:file_type . "=VimCmdScriptFile\""
+		    echo l:cmdline
+		    let l:cmd_output = system(l:cmdline)
+		endif
+
+		let l:reg_code = { (exists('s:') ? 's:' : '') . 'MkVimball_Vim_WriteAssociationRegKeys' }
+		    \ ('HKLM', l:env_install_dir, l:file_type)
+	    endif
+
+	    if l:reg_code >= 0
+		call { (exists('s:') ? 's:' : '') . 'MkVimball_Vim_UpdatePATHEXT' }
+		    \ (l:per_user ? 'HKCU' : 'HKLM' , 1, l:file_type)
+		call { (exists('s:') ? 's:' : '') . 'MkVimball_Vim_ExplorerChangeNotify' }()
+	    endif
+	else
+	    call { (exists('s:') ? 's:' : '') . 'MkVimball_Vim_UpdatePATHEXT' }
+		    \ (l:per_user ? 'HKCU' : 'HKLM' , 0, l:file_type)
+
+	    if l:per_user
+		:
+	    else
+		let l:cmdline = 'Assoc ' . l:file_type . '='
+		echo l:cmdline
+		let l:cmd_output = system(l:cmdline)
+		if v:shell_error
+		    echoerr l:cmd_output
+		endif
+
+		let l:cmdline = 'FType VimCmdScriptFile='
+		echo l:cmdline
+		let l:cmd_output = system(l:cmdline)
+		if v:shell_error
+		    echoerr l:cmd_output
+		endif
+	    endif
+
+	    let l:cmdline = 'reg delete "' . (l:per_user ? 'HKCU' : 'HKLM') . '\Software\Classes\' . l:file_type . '" /f'
+	    echo l:cmdline
+	    let l:cmd_output = system(l:cmdline)
+	    if v:shell_error
+		echoerr l:cmd_output
+	    endif
+
+	    let l:cmdline = 'reg delete "' . (l:per_user ? 'HKCU' : 'HKLM') . '\Software\Classes\VimCmdScriptFile" /f'
+	    echo l:cmdline
+	    let l:cmd_output = system(l:cmdline)
+	    if v:shell_error
+		echoerr l:cmd_output
+	    endif
+
+	    call { (exists('s:') ? 's:' : '') . 'MkVimball_Vim_ExplorerChangeNotify' }()
+
+	    let l:cmdline = 'rmdir /S /Q ^"' . l:env_install_dir . '^"'
+	    echo l:cmdline
+	    let l:cmd_output = system(l:cmdline)
+	    if v:shell_error
+		echoerr l:cmd_output
+	    endif
+
+	    " Remove parent dir only if empty
+	    let l:cmdline = 'rmdir ^"' . l:env_install_dir . '\..^"'
+	    echo l:cmdline
+	    let l:cmd_output = system(l:cmdline)
+	    if v:shell_error
+		let l:cmd_output = system('cd .')
+	    endif
+	endif
+
+	let &cpoptions = l:save_cpo
+	return
+    elseif argv(l:first_arg_idx)[0:1] == '--'
+	echoerr "Unknown option " . argv(l:first_arg_idx)
+	let &cpoptions = l:save_cpo
+	return
+    endif
+
+    if a:0 && a:1
+	" Only process the install/uninstall arguments and return
+	let &cpoptions = l:save_cpo
+	return
+    endif
+
+    " read path prefix
+    if exists('g:mkvimball_src_path_prefix')
+	let l:mkvimball_src_path_prefix = g:mkvimball_src_path_prefix
+
+	if g:mkvimball_src_path_prefix == ''
+	    " an empty src_path_prefix disables the use of the current directory
+	    " as g:vimball_home
+	    let l:mkvimball_use_runtimepath = 1
+	endif
+    else
+	let l:mkvimball_src_path_prefix = $SRC_PATH_PREFIX
+    endif
+
+    if l:mkvimball_src_path_prefix != ''
+	let l:trailing_sep = l:mkvimball_src_path_prefix[len(l:mkvimball_src_path_prefix)-1]
+	if l:trailing_sep != '\' && l:trailing_sep != '/'
+	    if file_readable('NUL')
+		let l:mkvimball_src_path_prefix .= '\'
+	    else
+		let l:mkvimball_src_path_prefix .= '/'
+	    endif
+	endif
+    endif
+
+    " create new buffer with file names list
+    new
+
+    if exists('$VIMBALL_FILES')
+	if exists('g:mkvimball_delimiter_regexp')
+	    let l:mkvimball_delimiter_regexp = g:mkvimball_delimiter_regexp
+	else
+	    let l:mkvimball_delimiter_regexp = '\v\s+'
+	endif
+
+	let l:files_list = split($VIMBALL_FILES, l:mkvimball_delimiter_regexp)
+
+	if len(l:files_list) && l:files_list != ['-'] && l:files_list != [''] && l:files_list != []
+	    call append("$", l:files_list)
+	else
+	    " $VIMBALL_FILES is empty, read files from standard input
+	    augroup mkvimcmd
+		" return an error exit code if Vim exists after input()
+		" reaches end-of-file. This may happen if script is run with
+		" vim -e ..
+		au VimLeave * cquit
+	    augroup END
+	    while 1
+		let l:input_file = input('Vimball archive member file: ', '', 'file')
+		echo "\n"
+		if l:input_file != '' && l:input_file != '.'
+		    call append("$", l:input_file)
+		else
+		    break
+		endif
+	    endwhile
+	    augroup! mkvimcmd
+	endif
+	unlet l:files_list  " may be large
+    else
+	if l:first_arg_idx + 1 >= argc()
+	    " no files to archive
+	    if l:first_arg_idx >= argc()
+		" no archive file given
+		echoerr "    Usage: " . l:cmd_name . " Vimball srcfiles..."
+		if l:script_name == ''
+		    echo ""
+		endif
+	    else
+		" use the newly opened buffer
+		execute "silent edit " . fnameescape(argv(l:first_arg_idx))
+		VimballList
+		close
+	    endif
+
+	    let &cpoptions = l:save_cpo
+	    return
+	else
+	    echo "Creating vimball archive"
+
+	    for l:fname_arg in range(l:first_arg_idx + 1, argc() - 1)
+		call append("$", fnamemodify(argv(l:fname_arg), ':.'))
+	    endfor
+	endif
+    endif
+
+    " trim initial empty line
+    " if getline(1) == ''
+    "     normal ggdd
+    " endif
+
+    " remove the src path prefix from file names
+    if l:mkvimball_src_path_prefix != ''
+	execute "%substitute#^\\V" . substitute(substitute(l:mkvimball_src_path_prefix, '\v\\', '\\\\', 'g'), '\V#', '\#', 'g') . '##'
+    endif
+
+    " set-up g:vimball_home
+    if !exists('g:vimball_home')
+	if l:mkvimball_src_path_prefix != ''
+	    let g:vimball_home = l:mkvimball_src_path_prefix
+	    let l:unlet_vimball_home = 1
+	else
+	    if exists('l:mkvimball_use_runtimepath') && l:mkvimball_use_runtimepath
+		:
+	    else
+		let g:vimball_home = '.'
+		let l:unlet_vimball_home = 1
+	    endif
+	endif
+    endif
+
+    " ensure canoncal file names are used by Vimball plugin
+    " Vim might change a file name upon file open, to match an existing buffer name
+    let l:list_buf_no = bufnr('%')
+    let l:n_lines = line('$')
+    new
+    if exists('g:vimball_home') && g:vimball_home != ''
+	execute "lcd " . fnameescape(g:vimball_home)
+    else
+	" find first path in &runtimepath
+	let l:vimball_dir = [ ]
+	for l:path in split(&runtimepath, ',')
+	    call append(l:vimball_dir, path)
+	    if l:path[len(l:path)-1] == '\'
+		continue
+	    endif
+	    break
+	endfor
+
+	let l:vimball_dir = join(l:vimball_dir, ',')
+	" replace '\,' with ','
+	let l:vimball_dir = substitute(l:vimball_dir, '\V\\,', ',', 'g')
+	" replace '\\' with '\', but not on Windows
+	if fnameescape('\') == '\\'
+	    let l:vimball_dir = substitute(l:vimball_dir, '\V\\\\,', '\\', 'g')
+	endif
+
+	execute "lcd " . fnameescape(l:vimball_dir)
+    endif
+
+    for l:ln in range(2, l:n_lines)
+	let l:archive_member_file = getbufline(l:list_buf_no, l:ln)[0]
+	execute "edit " . fnameescape(l:archive_member_file)
+	if bufname('%') != l:archive_member_file
+	    echomsg "Buffer " . bufname('%') . " overrides archive member " . l:archive_member_file . ', wipping out.'
+	    let l:wipe_bufname = bufname('%')
+	    enew
+	    execute "bwipeout " . fnameescape(l:wipe_bufname)
+	endif
+    endfor
+    close
+
+    " unload a buffer named by the vimball file
+    let l:vimball_buffnr = bufloaded(argv(l:first_arg_idx))
+    if l:vimball_buffnr
+	echo "Unloading buffer " . string(bufnr(argv(l:first_arg_idx))) . " " .bufname(bufnr(argv(l:first_arg_idx)))
+        " it might be nice to also restore the buffer after mkvimball
+        let l:vimball_buffwin = bufwinnr(l:vimball_buffnr)
+        execute "bunload " . bufnr(argv(l:first_arg_idx))
+    endif
+
+    " invoke :%MkVimball!
+    execute "2,$MkVimball! " . argv(l:first_arg_idx)
+    echomsg ""
+
+    if exists('l:unlet_vimball_home') && l:unlet_vimball_home
+	unlet g:vimball_home
+    endif
+
+    for l:k in keys(l:)
+	unlet l:[l:k]
+    endfor
+
+    if exists('l:script_buffer') && l:script_buffer != -1
+	execute "edit! " . fnameescape(argv(0))
+    else
+	if exists('l:vimball_buffwin') && l:vimball_buffwin != -1
+	    " try to restore the closed buffer, but only works if buffer
+	    " window was in the current tab page
+	    execute "edit! " . fnameescape(argv(l:first_arg_idx))
+	else
+	    quit!	" close the new buffer
+	endif
+    endif
+endfunction
+"
+call {(exists('s:') ? 's:' : '') . 'MkVimball_Vim_Main'}(expand('<sfile>'))
+delfunction {(exists('s:') ? 's:' : '') . 'MkVimball_Vim_Main'}
+
+if len(v:errmsg)
+    echomsg v:errmsg
+endif
+"
+"   vim: ts=8:sts=4:ft=vim:norl

@@ -28,24 +28,24 @@ run-clean:
 	# Other settings (like env vars) still apply
 	$(GVIM_CMD_CLEAN)
 
-# mkvimball: src/mkvimball/mkvimball.exim src/mkvimball/mkvimball.exim.cmd src/mkvimball/mkvimball.exim.js \
-# 	   src/mkvimball/mkvimball.setenv.js src/mkvimball/ShellUpdateNotify.cs \
-# 	   src/mkvimball/ShellUpdateNotify.ps1 mkvimball.build.exim $(MAKEFILE)
-# 	vim \
-# 	    -i NONE -V1 -nNesS mkvimball.build.exim -c 'echo""|qall!' -- \
-# 	    src/mkvimball/mkvimball.exim \
-# 	    src/mkvimball/mkvimball.exim.cmd \
-# 	    src/mkvimball/mkvimball.exim.js \
-# 	    src/mkvimball/mkvimball.setenv.js \
-# 	    src/mkvimball/checkElevate.js \
-# 	    src/mkvimball/ShellUpdateNotify.cs \
-# 	    src/mkvimball/ShellUpdateNotify.ps1
-# 
-# 	chmod +x mkvimball
+mkvimball: src/mkvimball/mkvimball.exim src/mkvimball/mkvimball.exim.cmd src/mkvimball/mkvimball.exim.js \
+	   src/mkvimball/mkvimball.setenv.js src/mkvimball/ShellUpdateNotify.cs \
+	   src/mkvimball/ShellUpdateNotify.ps1 mkvimball.build.exim $(MAKEFILE)
+	vim \
+	    -i NONE -V1 -nNesS mkvimball.build.exim -c 'echo""|qall!' -- \
+	    src/mkvimball/mkvimball.exim \
+	    src/mkvimball/mkvimball.exim.cmd \
+	    src/mkvimball/mkvimball.exim.js \
+	    src/mkvimball/mkvimball.setenv.js \
+	    src/mkvimball/checkElevate.js \
+	    src/mkvimball/ShellUpdateNotify.cs \
+	    src/mkvimball/ShellUpdateNotify.ps1
 
-mkvimball.vba.zip: mkvimball.vim $(MAKEFILE)
+	chmod +x mkvimball
+
+mkvimball.vba.zip: mkvimball $(MAKEFILE)
 	rm -rf mkvimball.vba mkvimball.vba.zip
-	./mkvimball.vim -V1 "-"- mk"vimball.vba" "mk"vimball.vim || test -r mkvimball.vba
+	./mkvimball -V1 "-"- mk"vimball.vba" "mk"vimball || test -r mkvimball.vba
 	zip -o -9 "mkvimball.vba.zip" mkvimball.vba
 
 mkvimball.vba: mkvimball.vba.zip
@@ -57,8 +57,8 @@ mk-vimball: mkvimball.vba.zip
 # 	    && \
 # 	PWD="$${PWD}" DEJAGNU="$(DEJAGNU)" $(RUNTEST) --all --tool "mkvimball"
 
-$(PLUGIN).vba.zip: $(SOURCE) $(MAKEFILE)
-	VIMBALL_FILES="$(SOURCE)" $(VIM_CMD_CLEAN) -f -V1 -nNesS mkvimball.vim -c 'echo "" | qall!' "$(PLUGIN)"
+$(PLUGIN).vba.zip: $(SOURCE) mkvimball $(MAKEFILE)
+	VIMBALL_FILES="$(SOURCE)" $(VIM_CMD_CLEAN) -f -V1 -nNesS mkvimball -c 'echo "" | qall!' "$(PLUGIN)"
 	test -r "$(PLUGIN).vba"
 	zip -9 "$(PLUGIN).vba.zip" "$(PLUGIN).vba"
 	rm -f -- "$(PLUGIN).vba"
@@ -74,7 +74,7 @@ vimball: $(PLUGIN).vba.zip
 
 clean:
 	rm -f -- "$(PLUGIN).vba"* "$(PLUGIN).log" "$(PLUGIN).sum"
-	rm -f -- "mkvimball.vba"* "mkvimball-tmlp.vim"
+	rm -f -- "mkvimball" "mkvimball.cmd" "mkvimball.js" "mkvimball.vba"* "mkvimball-tmlp.vim" "mkvimball.vim" "mkvimball.exim
 
 zip: clean
 	PLUGIN=$$(basename -- "$$PWD") && cd .. && zip -r -9 -u "$$PLUGIN.zip" "$$PLUGIN" -x \*.py[co] -x \*.sw[po] -x \*.bak -x \*\~ x \*.orig -x \*/.netrw\* -x \*.vba -x \*.vba.zip \*.vmb \*.log \*.sum

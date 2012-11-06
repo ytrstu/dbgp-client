@@ -1,0 +1,107 @@
+"
+" Generates (builds) mkvimball.exim by reading in the contents
+" of the given source files.
+"
+" Note the script can detect wrong input files (that are missing
+" the input file marker), but missing input files will silently
+" go un-noticed.
+"
+"      Licence: This file is placed in the public domain
+"	Author: Timothy Madden <terminatorul <at> gmail.com>
+"   Maintainer: Timothy Madden <terminatorul <at> gmail.com>
+"	 Usage:
+"		vim -i NONE -nNesS mkvimball.build.exim -- \
+"		    src/mkvimball/mkvimball.exim \
+"		    src/mkvimball/mkvimball.vim.js \
+"		    src/mkvimball/mkvimball.cmd.js \
+"		    src/mkvimball/mkvimball.setenv.js
+"  Last Change: nov 2, 2012
+"      Version: 1.0
+"
+"
+" Receives the template file and the source input files as argument, otherwise
+" the template file and the input source files are taken as the :args from Vim
+function! { (exists('s:') ? 's:' : '' ) . 'MkVimball_Vim_BuildFromTemplate'}(files_list) " abort
+    if len(a:files_list) < 2 && argc() < 2
+	echoerr "Syntax: " . expand('<sfile>') . "#BuildFromTemplate(templ-file, included-files...)"
+	return
+    else
+	if len(a:files_list) == 0
+	    let l:files_list = argv()
+	else
+	    let l:files_list = a:files_list
+	endif
+    endif
+
+    " load the template file
+    execute "new " . fnameescape(remove(l:files_list, 0))
+    new
+    let l:source_window = winnr()
+    wincmd p	" go to previous window
+    let l:template_window = winnr()
+
+    for l:arg in l:files_list
+	execute l:source_window . "wincmd w"
+	execute "edit! " . fnameescape(l:arg)
+	let l:marker_lineno =
+	    \ search("\\Vinput file contents marker: a7ec181d243150b7e40823f224174a281f46e986", "ncw")
+
+	if l:marker_lineno == 0 || l:marker_lineno + 1 > line('$')
+	    echoerr "Wrong included source file " . l:arg . ". Contents marker not found."
+	    return
+	endif
+
+	let l:marker_lineno += 1
+	let l:marker_pos = match(getline(l:marker_lineno), '\v\c<[0-9a-z]{40}>')    " Locate a SHA1 hash on the text line
+	if l:marker_pos < 0
+	    echoerr "Wrong included source file " . l:arg . ". Contents marker not found."
+	    return
+	endif
+
+	let l:marker = strpart(getline(l:marker_lineno), l:marker_pos, 40)
+
+	" switch to the template window
+	execute l:template_window . "wincmd w"
+	" locate the template marker
+	let l:marker_pos = search("\\V\\c\\<" . l:marker . "\\>", "ncw")
+	if l:marker_pos == 0
+	    echoerr "Template does not include given source file " . l:arg . ". Contents marker " . l:marker . " not found."
+	    return
+	endif
+	" read line indent
+	let l:source_indent = indent(l:marker_pos)
+	" switch back to the source window
+	execute l:source_window . "wincmd w"
+
+	" escape apostrophes in the entire file
+	%substitute#\V'#''#ge
+	" include every line of text within quotes, prefix it with a backslash,
+	" suffix it with a comma (,), and indent the lines.
+	execute
+	    \ '%substitute#\v(^.*$)#'
+	    \	.
+	    \ repeat('\t', l:source_indent / &tabstop) . repeat(' ', l:source_indent % &tabstop)
+	    \	.
+	    \ '\\   ''\1'',#g'
+	" remove comma (,) at the end of the last line
+	$substitute#,$##
+
+	" store buffer number
+	let l:source_buff = winbufnr(0)
+
+	" switch to template window and the marker pos
+	execute l:template_window . 'wincmd w'
+	call cursor(l:marker_pos, 1)
+
+	" replace the marker line with the entire source buffer
+	call setline('.', getbufline(l:source_buff, 1))
+	call append('.', getbufline(l:source_buff, 2, '$'))
+    endfor
+
+    " write the resulting template file in the current directory
+    execute l:template_window . 'wincmd w'
+    write! %:t:r
+endfunction
+"
+call {(exists('s:') ? 's:' : '' ) . 'MkVimball_Vim_BuildFromTemplate'}([])
+" vi:ft=vim
